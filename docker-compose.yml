@@ -1,65 +1,85 @@
-version: "3.9"
+version: "3.8"
 
 services:
-  exporter:
-    build:
-      context: ./exporter
-    container_name: obs-node-exporter
-    restart: unless-stopped
-    ports:
-      - "9100:9100"
-    volumes:
-      - /:/host:ro,rslave
-      - ./exporter/textfile:/etc/node-exporter/textfile
+  postgres:
+    image: postgres:15
     environment:
-      - NODE_EXPORTER_FLAGS=
+      POSTGRES_USER: pguser
+      POSTGRES_PASSWORD: pgpass
+      POSTGRES_DB: appdb
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - monitoring
 
-  ping-exporter:
-    image: czerwonk/ping_exporter:latest
-    container_name: obs-ping-exporter
-    restart: unless-stopped
-    cap_add:
-      - NET_RAW
-    environment:
-      - CONFIG_FILE=/config/ping_exporter.yml
-    ports:
-      - "9427:9427"
-    volumes:
-      - ./ping-exporter/ping_exporter.yml:/config/ping_exporter.yml:ro
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
     depends_on:
-      - exporter
+      - postgres
+    environment:
+      DATA_SOURCE_NAME: "postgresql://pguser:pgpass@postgres:5432/appdb?sslmode=disable"
+    networks:
+      - monitoring
+
+  load-generator:
+    build: ./loadgen
+    depends_on:
+      - postgres
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: appdb
+      DB_USER: pguser
+      DB_PASS: pgpass
+    networks:
+      - monitoring
+    restart: unless-stopped
 
   prometheus:
-    build:
-      context: ./prometheus
-    image: obs-prometheus
-    container_name: obs-prometheus
-    restart: unless-stopped
-    depends_on:
-      - exporter
-      - ping-exporter
-    ports:
-      - "9090:9090"
+    image: prom/prometheus:latest
     volumes:
-      - prometheus-data:/prometheus
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    networks:
+      - monitoring
+    restart: unless-stopped
 
   grafana:
-    build:
-      context: ./grafana
-    image: obs-grafana
-    container_name: obs-grafana
-    restart: unless-stopped
+    image: grafana/grafana:latest
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=DevJunior
-      - GF_USERS_ALLOW_SIGN_UP=false
-    depends_on:
-      - prometheus
+      - GF_SERVER_HTTP_PORT=3300
+      - GF_SECURITY_ADMIN_PASSWORD=admin
     volumes:
-      - grafana-data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    networks:
+      - monitoring
+    restart: unless-stopped
+
+  nginx:
+    build: ./nginx
+    depends_on:
+      - grafana
+    ports:
+      - "3300:443"     # Host port 3300 -> nginx 443 (HTTPS)
+    networks:
+      - monitoring
+    restart: unless-stopped
+
+  ssh:
+    image: rastasheep/ubuntu-sshd:18.04
+    environment:
+      - SSH_PASSWORD=sshpass
+    ports:
+      - "22:22"        # Host SSH access (conforme solicitado)
+    networks:
+      - monitoring
+    restart: unless-stopped
 
 volumes:
-  prometheus-data:
-  grafana-data:
+  db_data:
+
+networks:
+  monitoring:
+    driver: bridge
